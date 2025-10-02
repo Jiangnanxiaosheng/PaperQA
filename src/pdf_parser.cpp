@@ -5,150 +5,133 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>  // For std::unique_ptr
 #include <sstream>
+
+#include "json.hpp"
+
+// 为了方便使用，使用 nlohmann 命名空间
+using json = nlohmann::json;
 
 namespace paper_qa {
 
-    // PDFium上下文结构体定义
+    // PDFium上下文结构体定义 (虽然这里没用到，但保留结构)
     struct PdfParser::PdfiumContext {
-        std::string file_path;
+        std::string filepath;
 
-        PdfiumContext() : file_path("") {}
+        PdfiumContext() : filepath("") {}
     };
 
     PdfParser::PdfParser() : context_(std::make_unique<PdfiumContext>()), page_count_(0) {}
 
     PdfParser::~PdfParser() { clear(); }
 
-    bool PdfParser::parse(const std::string& file_path) {
+    bool PdfParser::parse(const std::string& filepath) {
         // 清空之前的解析结果
         clear();
 
         // 检查文件是否存在
-        std::ifstream file(file_path, std::ios::binary);
+        std::ifstream file(filepath, std::ios::binary);
         if (!file.good()) {
-            std::cerr << "PDF file not found: " << file_path << std::endl;
+            std::cerr << "PDF file not found: " << filepath << std::endl;
             return false;
         }
+        file.close();
 
-        // 保存文件路径
-        context_->file_path = file_path;
+        // 构建Python脚本的命令
+        // 确保python3在你的PATH中，并且脚本路径正确
+        std::string command = "python3 python/pdf_parser.py \"" + filepath + "\"";
 
-        // 使用Python脚本解析PDF
-        std::string python_cmd = "python python/pdf_parser.py \"" + file_path + "\"";
-        FILE* pipe = popen(python_cmd.c_str(), "r");
+        // 执行命令并打开管道读取输出
+        FILE* pipe = popen(command.c_str(), "r");
         if (!pipe) {
-            std::cerr << "Failed to run Python script" << std::endl;
+            std::cerr << "Failed to execute Python script." << std::endl;
             return false;
         }
 
-        // 读取Python脚本的输出
-        char buffer[128];
-        std::string result = "";
+        // 读取Python脚本的全部输出 (JSON字符串)
+        std::stringstream ss;
+        char buffer[4096];
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            result += buffer;
+            ss << buffer;
         }
 
-        // 关闭管道
-        pclose(pipe);
-
-        // 解析结果
-        if (result.empty()) {
-            std::cerr << "Python script returned empty result" << std::endl;
+        // 关闭管道并检查退出状态
+        int exit_code = pclose(pipe);
+        if (exit_code != 0) {
+            std::cerr << "Python script exited with error code: " << exit_code << std::endl;
+            // 尝试打印错误输出
+            std::cerr << "Script output was: " << ss.str() << std::endl;
             return false;
         }
 
-        // 尝试解析JSON格式的结果
-        // 首先检查是否是JSON格式
-        if (result.find("{") == 0 || result.find("[") == 0) {
-            // 简单的JSON解析（在实际应用中应该使用JSON解析库）
-            size_t text_start = result.find("\"text\":");
-            if (text_start != std::string::npos) {
-                size_t text_value_start = result.find("\"", text_start + 7) + 1;
-                size_t text_value_end = result.find("\"", text_value_start);
-                if (text_value_end != std::string::npos) {
-                    text_ = result.substr(text_value_start, text_value_end - text_value_start);
-                    // 处理转义字符
-                    size_t pos = 0;
-                    while ((pos = text_.find("\\n", pos)) != std::string::npos) {
-                        text_.replace(pos, 2, "\n");
-                        pos += 1;
-                    }
-                }
-            }
-
-            // 解析页面文本
-            size_t pages_start = result.find("\"pages\":");
-            if (pages_start != std::string::npos) {
-                size_t array_start = result.find("[", pages_start);
-                size_t array_end = result.find("]", array_start);
-                if (array_start != std::string::npos && array_end != std::string::npos) {
-                    std::string pages_array =
-                        result.substr(array_start + 1, array_end - array_start - 1);
-
-                    // 简单解析页面数组
-                    size_t start = 0;
-                    size_t end = pages_array.find("\"", start);
-                    while (end != std::string::npos) {
-                        start = end + 1;
-                        end = pages_array.find("\"", start);
-                        if (end != std::string::npos) {
-                            std::string page_text = pages_array.substr(start, end - start);
-                            // 处理转义字符
-                            size_t pos = 0;
-                            while ((pos = page_text.find("\\n", pos)) != std::string::npos) {
-                                page_text.replace(pos, 2, "\n");
-                                pos += 1;
-                            }
-                            pages_text_.push_back(page_text);
-
-                            // 跳过分隔符
-                            start = end + 1;
-                            end = pages_array.find("\"", start);
-                        }
-                    }
-                }
-            }
-
-            // 如果没有解析到页面文本，使用整个文本作为单页
-            if (pages_text_.empty() && !text_.empty()) {
-                pages_text_.push_back(text_);
-            }
-        } else {
-            // 如果不是JSON格式，使用原来的处理方式
-            text_ = result;
-
-            // 简单的文本分页（按双换行符分割，表示段落分隔）
-            std::stringstream ss(text_);
-            std::string line;
-            std::string current_page;
-
-            while (std::getline(ss, line)) {
-                if (line.empty() && !current_page.empty()) {
-                    pages_text_.push_back(current_page);
-                    current_page = "";
-                } else if (!line.empty()) {
-                    if (!current_page.empty()) {
-                        current_page += "\n";
-                    }
-                    current_page += line;
-                }
-            }
-
-            // 添加最后一页
-            if (!current_page.empty()) {
-                pages_text_.push_back(current_page);
-            }
+        std::string result = ss.str();
+        if (result.empty()) {
+            std::cerr << "Python script produced no output." << std::endl;
+            return false;
         }
 
-        page_count_ = pages_text_.size();
+        // --- 使用 nlohmann/json 进行解析 ---
+        try {
+            // 1. 将字符串解析为JSON对象
+            json data = json::parse(result);
 
-        // 添加一些基本的元数据
-        metadata_["file_path"] = file_path;
-        metadata_["page_count"] = std::to_string(page_count_);
+            // 2. 安全地提取 "text" 字段
+            if (data.contains("text") && data["text"].is_string()) {
+                text_ = data["text"].get<std::string>();
+            } else {
+                std::cerr << "Warning: JSON does not contain a valid 'text' field." << std::endl;
+            }
 
+            // 3. 安全地提取 "page_count" 字段 (修正字段名)
+            if (data.contains("page_count") && data["page_count"].is_number_integer()) {
+                page_count_ = data["page_count"].get<int>();
+            } else {
+                std::cerr << "Warning: JSON does not contain a valid 'page_count' field."
+                          << std::endl;
+            }
+
+            // 4. 安全地提取 "metadata" 对象
+            if (data.contains("metadata") && data["metadata"].is_object()) {
+                for (auto& [key, value] : data["metadata"].items()) {
+                    // 确保值是字符串类型
+                    if (value.is_string()) {
+                        metadata_[key] = value.get<std::string>();
+                    }
+                }
+            } else {
+                std::cerr << "Warning: JSON does not contain a valid 'metadata' object."
+                          << std::endl;
+            }
+
+            // 5. 安全地提取 "pages" 数组 (修正字段名)
+            if (data.contains("pages") && data["pages"].is_array()) {
+                pages_text_.clear();
+                for (const auto& page_text_json : data["pages"]) {
+                    if (page_text_json.is_string()) {
+                        pages_text_.push_back(page_text_json.get<std::string>());
+                    }
+                }
+            } else {
+                std::cerr << "Warning: JSON does not contain a valid 'pages' array." << std::endl;
+            }
+
+        } catch (const json::parse_error& e) {
+            // 捕获JSON解析错误
+            std::cerr << "JSON Parse Error: " << e.what() << std::endl;
+            std::cerr << "Failed to parse output: " << result << std::endl;
+            return false;
+        } catch (const std::exception& e) {
+            // 捕获其他可能的异常
+            std::cerr << "Error during JSON processing: " << e.what() << std::endl;
+            return false;
+        }
+
+        // 如果没有致命错误，解析成功
         return true;
     }
+
+    // --- Getter 函数实现 ---
 
     const std::string& PdfParser::get_text() const { return text_; }
 
@@ -156,11 +139,12 @@ namespace paper_qa {
 
     int PdfParser::get_page_count() const { return page_count_; }
 
-    std::string PdfParser::get_page_text(int page_number) const {
-        if (page_number < 0 || page_number >= page_count_) {
+    std::string PdfParser::get_page_text(int pagenumber) const {
+        // pagenumber 是从0开始的索引
+        if (pagenumber < 0 || pagenumber >= static_cast<int>(pages_text_.size())) {
             return "";
         }
-        return pages_text_[page_number];
+        return pages_text_[pagenumber];
     }
 
     const std::vector<std::string>& PdfParser::get_pages_text() const { return pages_text_; }
@@ -170,7 +154,7 @@ namespace paper_qa {
         pages_text_.clear();
         metadata_.clear();
         page_count_ = 0;
-        context_->file_path = "";
+        context_->filepath = "";
     }
 
-}  // namespace paper_qa
+}  // namespace paperqa

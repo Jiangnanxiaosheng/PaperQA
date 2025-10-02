@@ -15,7 +15,7 @@ set(SOURCES
     src/pdf_parser.cpp
     src/text_processor.cpp
     # src/vectorizer.cpp
-    # src/vector_db.cpp
+    #src/vector_db.cpp
     # src/llm_client.cpp
     # src/rag_engine.cpp
     # src/web_server.cpp
@@ -30,7 +30,7 @@ add_custom_target(copy_python_scripts ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/python
             ${CMAKE_BINARY_DIR}/python
-    DEPENDS ${CMAKE_SOURCE_DIR}/python/pdf_parser.py ${CMAKE_SOURCE_DIR}/python/langchain_processor.py ${CMAKE_SOURCE_DIR}/python/simple_langchain_processor.py ${CMAKE_SOURCE_DIR}/python/glm_interface.py ${CMAKE_SOURCE_DIR}/python/requirements.txt
+    DEPENDS ${CMAKE_SOURCE_DIR}/python/pdf_parser.py  ${CMAKE_SOURCE_DIR}/python/glm_interface.py ${CMAKE_SOURCE_DIR}/python/requirements.txt
 )
 
 # 2. 让可执行文件依赖于这个复制目标
@@ -41,7 +41,7 @@ add_dependencies(paper-qa copy_python_scripts)
 add_custom_target(install_python_deps
     COMMAND ${CMAKE_COMMAND} -E echo "Installing Python dependencies..."
     COMMAND pip install -r ${CMAKE_BINARY_DIR}/python/requirements.txt
-    COMMENT "Installing Python dependencies for LangChain and GLM"
+    COMMENT "Installing Python dependencies for GLM and text processing"
     VERBATIM
 )
 

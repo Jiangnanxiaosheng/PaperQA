@@ -338,8 +338,9 @@ class GLMInterface:
             print(f"Error parsing response: {e}")
             return {}
     
-    def process_text_with_glm(self, text: str, operations: List[str], 
-                             chunk_size: int = 500, max_keywords: int = 10) -> Dict[str, Any]:
+    def process_text_with_glm(self, text: str, operations: List[str],
+                             chunk_size: int = 500, chunk_overlap: int = 50,
+                             max_keywords: int = 10, question: Optional[str] = None) -> Dict[str, Any]:
         """
         使用GLM4.5处理文本的完整流程
         
@@ -384,6 +385,14 @@ class GLMInterface:
                     result["results"]["structure"] = structure
                     result["operations_performed"].append("structure_analysis")
                 
+                elif operation == "answer_question":
+                    if question:
+                        answer = self.answer_question(question, text)
+                        result["results"]["answer"] = answer
+                        result["operations_performed"].append("answer_question")
+                    else:
+                        result["results"]["answer_question"] = {"error": "No question provided"}
+                
             except Exception as e:
                 print(f"Error in operation {operation}: {e}")
                 result["results"][operation] = {"error": str(e)}
@@ -395,10 +404,12 @@ def main():
     parser = argparse.ArgumentParser(description="GLM4.5 Interface")
     parser.add_argument("--text", type=str, help="Input text to process")
     parser.add_argument("--file", type=str, help="Input file containing text to process")
-    parser.add_argument("--operation", type=str, nargs="+", 
-                       choices=["keyword_extraction", "semantic_chunking", "summarization", "structure_analysis"],
+    parser.add_argument("--operation", type=str, nargs="+",
+                       choices=["keyword_extraction", "semantic_chunking", "summarization", "structure_analysis", "answer_question"],
                        default=["keyword_extraction"], help="Operations to perform")
+    parser.add_argument("--question", type=str, help="Question to answer (for answer_question operation)")
     parser.add_argument("--chunk-size", type=int, default=500, help="Chunk size for chunking")
+    parser.add_argument("--chunk-overlap", type=int, default=50, help="Chunk overlap for chunking")
     parser.add_argument("--max-keywords", type=int, default=10, help="Maximum keywords to extract")
     parser.add_argument("--api-key", type=str, help="GLM API key")
     parser.add_argument("--base-url", type=str, help="GLM API base URL")
@@ -422,13 +433,19 @@ def main():
     
     # 创建GLM接口
     glm_interface = GLMInterface(api_key=args.api_key, base_url=args.base_url)
-    
+
     # 处理文本
+    if "answer_question" in args.operation and not args.question:
+        print("Error: --question is required when using answer_question operation")
+        sys.exit(1)
+
     result = glm_interface.process_text_with_glm(
         text=text,
         operations=args.operation,
         chunk_size=args.chunk_size,
-        max_keywords=args.max_keywords
+        chunk_overlap=args.chunk_overlap,
+        max_keywords=args.max_keywords,
+        question=args.question if "answer_question" in args.operation else None
     )
     
     # 输出结果

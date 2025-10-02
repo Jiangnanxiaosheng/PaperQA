@@ -77,13 +77,14 @@ namespace paper_qa {
             return chunks;
         }
 
-        // 首先尝试使用LangChain进行智能分块
-        std::string langchain_cmd =
-            "python python/langchain_processor.py --text \"" + escape_json_string(cleaned_text) +
-            "\" --chunk-size " + std::to_string(chunk_size_) + " --chunk-overlap " +
-            std::to_string(chunk_overlap_) + " --output langchain_chunks.json";
+        // 优先使用GLM4.5进行智能分块
+        std::cout << "尝试使用GLM4.5进行智能分块..." << std::endl;
+        std::string glm_cmd =
+            "python python/glm_interface.py --text \"" + escape_json_string(cleaned_text) +
+            "\" --operation semantic_chunking --chunk-size " + std::to_string(chunk_size_) +
+            " --chunk-overlap " + std::to_string(chunk_overlap_) + " --output glm_chunks.json";
 
-        FILE* pipe = popen(langchain_cmd.c_str(), "r");
+        FILE* pipe = popen(glm_cmd.c_str(), "r");
         if (pipe) {
             char buffer[128];
             std::string result = "";
@@ -92,191 +93,271 @@ namespace paper_qa {
             }
             pclose(pipe);
 
-            // 尝试解析JSON结果
-            if (!result.empty() && (result.find("{") == 0 || result.find("[") == 0)) {
-                try {
-                    // 简单解析分块结果
-                    size_t chunks_start = result.find("\"chunks\":");
-                    if (chunks_start != std::string::npos) {
-                        size_t array_start = result.find("[", chunks_start);
-                        size_t array_end = result.find("]", array_start);
-                        if (array_start != std::string::npos && array_end != std::string::npos) {
-                            std::string chunks_array =
-                                result.substr(array_start + 1, array_end - array_start - 1);
+            // 尝试读取输出文件
+            std::ifstream chunk_file("glm_chunks.json");
+            if (chunk_file.is_open()) {
+                std::string json_content;
+                std::string line;
+                while (std::getline(chunk_file, line)) {
+                    json_content += line;
+                }
+                chunk_file.close();
 
-                            // 解析块
-                            size_t pos = 0;
-                            while (pos < chunks_array.length()) {
-                                size_t text_start = chunks_array.find("\"text\":", pos);
-                                if (text_start == std::string::npos)
-                                    break;
+                // 尝试解析JSON结果
+                if (!json_content.empty()) {
+                    try {
+                        // 简单解析分块结果
+                        size_t chunks_start = json_content.find("\"chunks\":");
+                        if (chunks_start != std::string::npos) {
+                            size_t array_start = json_content.find("[", chunks_start);
+                            size_t array_end = json_content.find("]", array_start);
+                            if (array_start != std::string::npos &&
+                                array_end != std::string::npos) {
+                                std::string chunks_array = json_content.substr(
+                                    array_start + 1, array_end - array_start - 1);
 
-                                size_t value_start = chunks_array.find("\"", text_start + 7) + 1;
-                                size_t value_end = chunks_array.find("\"", value_start);
-                                if (value_end == std::string::npos)
-                                    break;
+                                // 解析块
+                                size_t pos = 0;
+                                while (pos < chunks_array.length()) {
+                                    size_t text_start = chunks_array.find("\"text\":", pos);
+                                    if (text_start == std::string::npos)
+                                        break;
 
-                                std::string chunk_text =
-                                    chunks_array.substr(value_start, value_end - value_start);
-                                // 处理转义字符
-                                size_t escape_pos = 0;
-                                while ((escape_pos = chunk_text.find("\\n", escape_pos)) !=
-                                       std::string::npos) {
-                                    chunk_text.replace(escape_pos, 2, "\n");
-                                    escape_pos += 1;
+                                    size_t value_start =
+                                        chunks_array.find("\"", text_start + 7) + 1;
+                                    size_t value_end = chunks_array.find("\"", value_start);
+                                    if (value_end == std::string::npos)
+                                        break;
+
+                                    std::string chunk_text =
+                                        chunks_array.substr(value_start, value_end - value_start);
+                                    // 处理转义字符
+                                    size_t escape_pos = 0;
+                                    while ((escape_pos = chunk_text.find("\\n", escape_pos)) !=
+                                           std::string::npos) {
+                                        chunk_text.replace(escape_pos, 2, "\n");
+                                        escape_pos += 1;
+                                    }
+
+                                    if (!chunk_text.empty()) {
+                                        chunks.emplace_back(chunk_text, 0, chunk_text.length(),
+                                                            page_number);
+                                    }
+
+                                    pos = value_end + 1;
                                 }
 
-                                if (!chunk_text.empty()) {
-                                    chunks.emplace_back(chunk_text, 0, chunk_text.length(),
-                                                        page_number);
+                                if (!chunks.empty()) {
+                                    std::cout << "使用GLM4.5智能分块，共 " << chunks.size() << " 块"
+                                              << std::endl;
+                                    return chunks;
                                 }
-
-                                pos = value_end + 1;
-                            }
-
-                            if (!chunks.empty()) {
-                                std::cout << "使用LangChain分块，共 " << chunks.size() << " 块"
-                                          << std::endl;
-                                return chunks;
                             }
                         }
+                    } catch (...) {
+                        // 解析失败，继续使用C++分块方法
                     }
-                } catch (...) {
-                    // 解析失败，继续使用原来的方法
                 }
             }
         }
 
-        // 如果LangChain分块失败，尝试使用简化版本
-        std::cout << "LangChain分块失败，尝试简化版本..." << std::endl;
-        std::string simple_cmd = "python python/simple_langchain_processor.py --text \"" +
-                                 escape_json_string(cleaned_text) + "\" --chunk-size " +
-                                 std::to_string(chunk_size_) + " --chunk-overlap " +
-                                 std::to_string(chunk_overlap_) + " --output simple_chunks.json";
+        // 如果GLM4.5分块失败，使用C++分块方法
+        std::cout << "GLM4.5智能分块失败，使用C++分块方法..." << std::endl;
 
-        FILE* simple_pipe = popen(simple_cmd.c_str(), "r");
-        if (simple_pipe) {
+        // 对于长文本，确保至少分成多个块
+        size_t text_length = cleaned_text.length();
+        size_t target_chunks = std::max(static_cast<size_t>(3), text_length / chunk_size_);
+        size_t adjusted_chunk_size = std::min(chunk_size_, text_length / target_chunks);
+
+        std::cout << "文本长度: " << text_length << ", 目标块数: " << target_chunks
+                  << ", 调整后块大小: " << adjusted_chunk_size << std::endl;
+
+        // 尝试使用GLM4.5进行智能分块
+        std::cout << "尝试使用GLM4.5进行智能分块..." << std::endl;
+        glm_cmd = "python python/glm_interface.py --text \"" + escape_json_string(cleaned_text) +
+                  "\" --operation semantic_chunking --chunk-size " +
+                  std::to_string(adjusted_chunk_size) + " --chunk-overlap " +
+                  std::to_string(chunk_overlap_) + " --output glm_chunks.json";
+
+        pipe = popen(glm_cmd.c_str(), "r");
+        if (pipe) {
             char buffer[128];
             std::string result = "";
-            while (fgets(buffer, sizeof(buffer), simple_pipe) != nullptr) {
+            while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
                 result += buffer;
             }
-            pclose(simple_pipe);
+            pclose(pipe);
 
-            // 尝试解析JSON结果
-            if (!result.empty() && (result.find("{") == 0 || result.find("[") == 0)) {
-                try {
-                    // 简单解析分块结果
-                    size_t chunks_start = result.find("\"chunks\":");
-                    if (chunks_start != std::string::npos) {
-                        size_t array_start = result.find("[", chunks_start);
-                        size_t array_end = result.find("]", array_start);
-                        if (array_start != std::string::npos && array_end != std::string::npos) {
-                            std::string chunks_array =
-                                result.substr(array_start + 1, array_end - array_start - 1);
+            // 尝试读取输出文件
+            std::ifstream chunk_file("glm_chunks.json");
+            if (chunk_file.is_open()) {
+                std::string json_content;
+                std::string line;
+                while (std::getline(chunk_file, line)) {
+                    json_content += line;
+                }
+                chunk_file.close();
 
-                            // 解析块
-                            size_t pos = 0;
-                            while (pos < chunks_array.length()) {
-                                size_t text_start = chunks_array.find("\"text\":", pos);
-                                if (text_start == std::string::npos)
-                                    break;
+                // 尝试解析JSON结果
+                if (!json_content.empty()) {
+                    try {
+                        // 简单解析分块结果
+                        size_t chunks_start = json_content.find("\"chunks\":");
+                        if (chunks_start != std::string::npos) {
+                            size_t array_start = json_content.find("[", chunks_start);
+                            size_t array_end = json_content.find("]", array_start);
+                            if (array_start != std::string::npos &&
+                                array_end != std::string::npos) {
+                                std::string chunks_array = json_content.substr(
+                                    array_start + 1, array_end - array_start - 1);
 
-                                size_t value_start = chunks_array.find("\"", text_start + 7) + 1;
-                                size_t value_end = chunks_array.find("\"", value_start);
-                                if (value_end == std::string::npos)
-                                    break;
+                                // 解析块
+                                size_t pos = 0;
+                                while (pos < chunks_array.length()) {
+                                    size_t text_start = chunks_array.find("\"text\":", pos);
+                                    if (text_start == std::string::npos)
+                                        break;
 
-                                std::string chunk_text =
-                                    chunks_array.substr(value_start, value_end - value_start);
-                                // 处理转义字符
-                                size_t escape_pos = 0;
-                                while ((escape_pos = chunk_text.find("\\n", escape_pos)) !=
-                                       std::string::npos) {
-                                    chunk_text.replace(escape_pos, 2, "\n");
-                                    escape_pos += 1;
+                                    size_t value_start =
+                                        chunks_array.find("\"", text_start + 7) + 1;
+                                    size_t value_end = chunks_array.find("\"", value_start);
+                                    if (value_end == std::string::npos)
+                                        break;
+
+                                    std::string chunk_text =
+                                        chunks_array.substr(value_start, value_end - value_start);
+                                    // 处理转义字符
+                                    size_t escape_pos = 0;
+                                    while ((escape_pos = chunk_text.find("\\n", escape_pos)) !=
+                                           std::string::npos) {
+                                        chunk_text.replace(escape_pos, 2, "\n");
+                                        escape_pos += 1;
+                                    }
+
+                                    if (!chunk_text.empty()) {
+                                        chunks.emplace_back(chunk_text, 0, chunk_text.length(),
+                                                            page_number);
+                                    }
+
+                                    pos = value_end + 1;
                                 }
 
-                                if (!chunk_text.empty()) {
-                                    chunks.emplace_back(chunk_text, 0, chunk_text.length(),
-                                                        page_number);
+                                if (!chunks.empty()) {
+                                    std::cout << "使用GLM4.5智能分块，共 " << chunks.size() << " 块"
+                                              << std::endl;
+                                    return chunks;
                                 }
-
-                                pos = value_end + 1;
-                            }
-
-                            if (!chunks.empty()) {
-                                std::cout << "使用简化版分块，共 " << chunks.size() << " 块"
-                                          << std::endl;
-                                return chunks;
                             }
                         }
+                    } catch (...) {
+                        // 解析失败，继续使用C++分块方法
                     }
-                } catch (...) {
-                    // 解析失败，继续使用原来的方法
                 }
             }
         }
 
-        // 如果Python分块都失败，使用原来的C++分块方法
-        std::cout << "Python分块失败，使用C++分块方法..." << std::endl;
+        // 如果GLM4.5分块失败，使用C++分块方法
+        std::cout << "GLM4.5智能分块失败，使用C++分块方法..." << std::endl;
 
         // 分割成句子
         std::vector<std::string> sentences = split_into_sentences(cleaned_text);
 
-        size_t current_pos = 0;
-        std::string current_chunk;
+        // 如果句子太少，直接按固定长度分块
+        if (sentences.size() <= target_chunks) {
+            std::cout << "句子太少，使用固定长度分块..." << std::endl;
+            size_t pos = 0;
+            while (pos < text_length) {
+                size_t end = std::min(pos + adjusted_chunk_size, text_length);
 
-        for (const auto& sentence : sentences) {
-            // 如果当前块加上新句子不超过块大小，添加到当前块
-            if (current_chunk.length() + sentence.length() + 1 <= chunk_size_) {
-                if (!current_chunk.empty()) {
-                    current_chunk += " ";
-                }
-                current_chunk += sentence;
-            } else {
-                // 保存当前块（如果不为空）
-                if (!current_chunk.empty()) {
-                    size_t start_pos = current_pos - current_chunk.length();
-                    chunks.emplace_back(current_chunk, start_pos, current_pos, page_number);
+                // 尝试在句子边界处分割
+                if (end < text_length) {
+                    for (size_t i = end; i > std::max(pos, end - 100); --i) {
+                        if (cleaned_text[i] == '.' || cleaned_text[i] == '!' ||
+                            cleaned_text[i] == '?' ||
+                            (static_cast<unsigned char>(cleaned_text[i]) == 0xa1 &&
+                             static_cast<unsigned char>(cleaned_text[i + 1]) ==
+                                 0xa3) ||  // 中文句号
+                            (static_cast<unsigned char>(cleaned_text[i]) == 0xa1 &&
+                             static_cast<unsigned char>(cleaned_text[i + 1]) ==
+                                 0xa1) ||  // 中文感叹号
+                            (static_cast<unsigned char>(cleaned_text[i]) == 0xa1 &&
+                             static_cast<unsigned char>(cleaned_text[i + 1]) ==
+                                 0xbf)) {  // 中文问号
+                            end = i + 1;
+                            break;
+                        }
+                    }
                 }
 
-                // 开始新块
-                current_chunk = sentence;
+                std::string chunk = cleaned_text.substr(pos, end - pos);
+                // 去除首尾空格
+                chunk.erase(0, chunk.find_first_not_of(" \t\n\r\f\v"));
+                chunk.erase(chunk.find_last_not_of(" \t\n\r\f\v") + 1);
+
+                if (!chunk.empty()) {
+                    chunks.emplace_back(chunk, pos, end, page_number);
+                }
+
+                pos = end - chunk_overlap_ / 2;  // 简单的重叠处理
+            }
+        } else {
+            // 按句子分块
+            size_t current_pos = 0;
+            std::string current_chunk;
+            size_t chunk_count = 0;
+
+            for (const auto& sentence : sentences) {
+                // 如果当前块加上新句子不超过调整后的块大小，添加到当前块
+                if (current_chunk.length() + sentence.length() + 1 <= adjusted_chunk_size) {
+                    if (!current_chunk.empty()) {
+                        current_chunk += " ";
+                    }
+                    current_chunk += sentence;
+                } else {
+                    // 保存当前块（如果不为空）
+                    if (!current_chunk.empty()) {
+                        size_t start_pos = current_pos - current_chunk.length();
+                        chunks.emplace_back(current_chunk, start_pos, current_pos, page_number);
+                        chunk_count++;
+                    }
+
+                    // 开始新块
+                    current_chunk = sentence;
+                    current_pos += sentence.length() + 1;  // +1 for space
+
+                    // 处理重叠
+                    if (!chunks.empty() && chunk_overlap_ > 0) {
+                        // 获取前一个块的末尾部分
+                        const TextChunk& prev_chunk = chunks.back();
+                        std::string prev_text = prev_chunk.text;
+
+                        // 找到合适的重叠点（尽量在句子边界）
+                        size_t overlap_start = prev_text.length() > chunk_overlap_
+                                                   ? prev_text.length() - chunk_overlap_
+                                                   : 0;
+
+                        // 找到下一个句子的开始
+                        size_t sentence_start = prev_text.find(". ", overlap_start);
+                        if (sentence_start != std::string::npos) {
+                            overlap_start = sentence_start + 2;  // +2 for ". "
+                        }
+
+                        // 添加重叠部分到当前块
+                        if (overlap_start < prev_text.length()) {
+                            std::string overlap = prev_text.substr(overlap_start);
+                            current_chunk = overlap + " " + current_chunk;
+                        }
+                    }
+                }
+
                 current_pos += sentence.length() + 1;  // +1 for space
-
-                // 处理重叠
-                if (!chunks.empty() && chunk_overlap_ > 0) {
-                    // 获取前一个块的末尾部分
-                    const TextChunk& prev_chunk = chunks.back();
-                    std::string prev_text = prev_chunk.text;
-
-                    // 找到合适的重叠点（尽量在句子边界）
-                    size_t overlap_start = prev_text.length() > chunk_overlap_
-                                               ? prev_text.length() - chunk_overlap_
-                                               : 0;
-
-                    // 找到下一个句子的开始
-                    size_t sentence_start = prev_text.find(". ", overlap_start);
-                    if (sentence_start != std::string::npos) {
-                        overlap_start = sentence_start + 2;  // +2 for ". "
-                    }
-
-                    // 添加重叠部分到当前块
-                    if (overlap_start < prev_text.length()) {
-                        std::string overlap = prev_text.substr(overlap_start);
-                        current_chunk = overlap + " " + current_chunk;
-                    }
-                }
             }
 
-            current_pos += sentence.length() + 1;  // +1 for space
-        }
-
-        // 添加最后一个块（如果不为空）
-        if (!current_chunk.empty()) {
-            size_t start_pos = current_pos - current_chunk.length();
-            chunks.emplace_back(current_chunk, start_pos, current_pos, page_number);
+            // 添加最后一个块（如果不为空）
+            if (!current_chunk.empty()) {
+                size_t start_pos = current_pos - current_chunk.length();
+                chunks.emplace_back(current_chunk, start_pos, current_pos, page_number);
+            }
         }
 
         std::cout << "使用C++分块，共 " << chunks.size() << " 块" << std::endl;
@@ -302,12 +383,13 @@ namespace paper_qa {
             return keywords;
         }
 
-        // 首先尝试使用LangChain进行高级关键词提取
-        std::string langchain_cmd = "python python/langchain_processor.py --text \"" +
-                                    escape_json_string(text) + "\" --max-keywords " +
-                                    std::to_string(max_keywords) + " --keyword-method hybrid";
+        // 直接使用GLM4.5进行关键词提取
+        std::string glm_cmd = "python python/glm_interface.py --text \"" +
+                              escape_json_string(text) +
+                              "\" --operation keyword_extraction --max-keywords " +
+                              std::to_string(max_keywords) + " --output glm_keywords.json";
 
-        FILE* pipe = popen(langchain_cmd.c_str(), "r");
+        FILE* pipe = popen(glm_cmd.c_str(), "r");
         if (pipe) {
             char buffer[128];
             std::string result = "";
@@ -316,56 +398,12 @@ namespace paper_qa {
             }
             pclose(pipe);
 
+            std::cout << "GLM4.5关键词提取完成" << std::endl;
+
             // 尝试解析JSON结果
             if (!result.empty() && (result.find("{") == 0 || result.find("[") == 0)) {
-                // 简单解析关键词数组
-                size_t keywords_start = result.find("\"keywords\":");
-                if (keywords_start != std::string::npos) {
-                    size_t array_start = result.find("[", keywords_start);
-                    size_t array_end = result.find("]", array_start);
-                    if (array_start != std::string::npos && array_end != std::string::npos) {
-                        std::string keywords_array =
-                            result.substr(array_start + 1, array_end - array_start - 1);
-
-                        // 解析关键词
-                        size_t start = 0;
-                        size_t end = keywords_array.find("\"", start);
-                        while (end != std::string::npos && keywords.size() < max_keywords) {
-                            start = end + 1;
-                            end = keywords_array.find("\"", start);
-                            if (end != std::string::npos) {
-                                std::string keyword = keywords_array.substr(start, end - start);
-                                if (!keyword.empty()) {
-                                    keywords.push_back(keyword);
-                                }
-                                start = end + 1;
-                                end = keywords_array.find("\"", start);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 如果LangChain方法失败，尝试使用简化版本
-        if (keywords.empty()) {
-            std::cout << "LangChain processor failed, trying simple version..." << std::endl;
-            std::string simple_cmd = "python python/simple_langchain_processor.py --text \"" +
-                                     escape_json_string(text) + "\" --max-keywords " +
-                                     std::to_string(max_keywords);
-
-            FILE* simple_pipe = popen(simple_cmd.c_str(), "r");
-            if (simple_pipe) {
-                char buffer[128];
-                std::string result = "";
-                while (fgets(buffer, sizeof(buffer), simple_pipe) != nullptr) {
-                    result += buffer;
-                }
-                pclose(simple_pipe);
-
-                // 尝试解析JSON结果
-                if (!result.empty() && (result.find("{") == 0 || result.find("[") == 0)) {
-                    // 简单解析关键词数组
+                try {
+                    // 简单解析关键词结果
                     size_t keywords_start = result.find("\"keywords\":");
                     if (keywords_start != std::string::npos) {
                         size_t array_start = result.find("[", keywords_start);
@@ -383,43 +421,60 @@ namespace paper_qa {
                                 if (end != std::string::npos) {
                                     std::string keyword = keywords_array.substr(start, end - start);
                                     if (!keyword.empty()) {
+                                        // 清理关键词，移除序号和点
+                                        size_t dot_pos = keyword.find(". ");
+                                        if (dot_pos != std::string::npos) {
+                                            keyword = keyword.substr(dot_pos + 2);
+                                        }
                                         keywords.push_back(keyword);
                                     }
                                     start = end + 1;
                                     end = keywords_array.find("\"", start);
                                 }
                             }
+
+                            if (!keywords.empty()) {
+                                std::cout << "使用GLM4.5提取关键词，共 " << keywords.size() << " 个"
+                                          << std::endl;
+                                return keywords;
+                            }
                         }
                     }
+                } catch (...) {
+                    // 解析失败，继续使用简化版
                 }
             }
         }
 
-        // 如果LangChain方法失败，回退到原来的方法
-        if (keywords.empty()) {
-            // 计算词频
-            std::map<std::string, int> word_freq = calculate_word_frequency(text);
+        // 如果GLM4.5失败，直接使用原来的方法
+        std::cout << "GLM4.5关键词提取失败，使用基本词频统计..." << std::endl;
 
-            // 过滤停用词和短词
-            std::vector<std::pair<std::string, int>> filtered_words;
-            for (const auto& [word, freq] : word_freq) {
-                if (word.length() > 1 &&
-                    std::find(stop_words_.begin(), stop_words_.end(), word) == stop_words_.end()) {
-                    filtered_words.emplace_back(word, freq);
-                }
-            }
+        // 如果都失败，回退到原来的方法
+        std::cout << "所有关键词提取方法失败，使用基本词频统计..." << std::endl;
 
-            // 按频率排序
-            std::sort(filtered_words.begin(), filtered_words.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
+        // 计算词频
+        std::map<std::string, int> word_freq = calculate_word_frequency(text);
 
-            // 取前max_keywords个词
-            size_t count = std::min(max_keywords, filtered_words.size());
-            for (size_t i = 0; i < count; ++i) {
-                keywords.push_back(filtered_words[i].first);
+        // 过滤停用词和短词
+        std::vector<std::pair<std::string, int>> filtered_words;
+        for (const auto& [word, freq] : word_freq) {
+            if (word.length() > 2 &&
+                std::find(stop_words_.begin(), stop_words_.end(), word) == stop_words_.end()) {
+                filtered_words.emplace_back(word, freq);
             }
         }
 
+        // 按频率排序
+        std::sort(filtered_words.begin(), filtered_words.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+
+        // 取前max_keywords个词
+        size_t count = std::min(max_keywords, filtered_words.size());
+        for (size_t i = 0; i < count; ++i) {
+            keywords.push_back(filtered_words[i].first);
+        }
+
+        std::cout << "使用基本词频统计提取关键词，共 " << keywords.size() << " 个" << std::endl;
         return keywords;
     }
 
